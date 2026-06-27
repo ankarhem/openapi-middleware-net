@@ -1,0 +1,429 @@
+using System.Text;
+using System.Text.Json;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Primitives;
+using Microsoft.OpenApi;
+using OpenApiContractValidation.Errors;
+using OpenApiContractValidation.Models;
+using OpenApiContractValidation.Options;
+
+namespace OpenApiContractValidation.Middleware;
+
+/// <summary>
+/// The ASP.NET Core middleware that validates every incoming request and outgoing response against the
+/// configured OpenAPI contract, throwing <see cref="OpenApiContractValidationException"/> on any
+/// violation.
+/// </summary>
+/// <remarks>
+/// <para>
+/// It is the adapter that turns the framework-agnostic core (loader, schema registry, request/response
+/// validators and path matcher) into a usable ASP.NET Core middleware. All heavy contract work is done
+/// once by the injected <see cref="OpenApiContractValidator"/> singleton; per-request work is limited to
+/// path resolution, body parsing and validation.
+/// </para>
+/// <para>
+/// <b>Response buffering.</b> When response validation is enabled the middleware installs a
+/// <see cref="HoldBackResponseBodyFeature"/> as the active
+/// <see cref="IHttpResponseBodyFeature"/> before invoking the rest of the pipeline. Every byte written by
+/// downstream application code is therefore captured in memory and <em>nothing reaches the client</em>
+/// until validation passes. If validation fails the exception is thrown before the buffered body is
+/// replayed, so an invalid response is never delivered. On success
+/// <see cref="HoldBackResponseBodyFeature.CommitAsync"/> flushes the buffer to the real transport.
+/// </para>
+/// <para>
+/// <b>Note on <c>Response.Body</c>.</b> The middleware installs the feature only and deliberately does
+/// <em>not</em> assign <c>HttpContext.Response.Body</c>: in ASP.NET Core the <c>Body</c> setter, when the
+/// active feature is not a <c>StreamResponseBodyFeature</c>, replaces the feature with a new
+/// <c>StreamResponseBodyFeature</c> and would un-install the hold-back. Setting the feature alone is
+/// sufficient because <c>HttpResponse.Body</c>/<c>BodyWriter</c> read through the active feature.
+/// </para>
+/// </remarks>
+public sealed class OpenApiValidationMiddleware
+{
+    private const string JsonToken = "json";
+
+    private readonly RequestDelegate _next;
+    private readonly OpenApiContractValidator _validator;
+    private readonly ILogger<OpenApiValidationMiddleware> _logger;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="OpenApiValidationMiddleware"/> class. The middleware
+    /// is constructed once (singleton); the <see cref="OpenApiContractValidator"/> is injected from DI.
+    /// </summary>
+    /// <param name="next">The next delegate in the pipeline.</param>
+    /// <param name="validator">The singleton that holds the loaded contract and validators.</param>
+    /// <param name="logger">The logger for diagnostic messages.</param>
+    public OpenApiValidationMiddleware(
+        RequestDelegate next,
+        OpenApiContractValidator validator,
+        ILogger<OpenApiValidationMiddleware> logger
+    )
+    {
+        _next = next ?? throw new ArgumentNullException(nameof(next));
+        _validator = validator ?? throw new ArgumentNullException(nameof(validator));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+
+    /// <summary>
+    /// Validates the request (and, when enabled, the buffered response) against the OpenAPI contract,
+    /// throwing <see cref="OpenApiContractValidationException"/> on any violation.
+    /// </summary>
+    /// <param name="context">The current HTTP context.</param>
+    public async Task InvokeAsync(HttpContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        var options = _validator.Options;
+        var direction = options.Validate;
+
+        if (direction == ValidationDirection.None)
+        {
+            await _next(context).ConfigureAwait(false);
+            return;
+        }
+
+        var method = context.Request.Method;
+        var path = context.Request.Path.Value ?? "/";
+
+        // Always resolve the operation: even response-only validation needs it.
+        _validator.TryResolveOperation(
+            method,
+            path,
+            out var operation,
+            out var pathParameters,
+            out var pathExists
+        );
+
+        if (!pathExists)
+        {
+            throw new OpenApiContractValidationException(
+                ContractPhase.Request,
+                method,
+                path,
+                new[]
+                {
+                    new ContractViolation(
+                        Location: "path",
+                        InstanceLocation: null,
+                        Keyword: null,
+                        Expected: null,
+                        Actual: path,
+                        Message: $"path '{path}' is not documented in the OpenAPI contract."
+                    ),
+                }
+            );
+        }
+
+        if (operation is null)
+        {
+            throw new OpenApiContractValidationException(
+                ContractPhase.Request,
+                method,
+                path,
+                new[]
+                {
+                    new ContractViolation(
+                        Location: "path",
+                        InstanceLocation: null,
+                        Keyword: null,
+                        Expected: null,
+                        Actual: method,
+                        Message: $"HTTP method '{method}' is not documented for path '{path}'."
+                    ),
+                }
+            );
+        }
+
+        if ((direction & ValidationDirection.Request) != 0)
+        {
+            var parsedRequest = await BuildParsedRequestAsync(context, method, path)
+                .ConfigureAwait(false);
+            var requestResult = _validator.ValidateRequest(
+                operation,
+                parsedRequest,
+                pathParameters
+            );
+            if (!requestResult.IsValid)
+            {
+                throw new OpenApiContractValidationException(
+                    ContractPhase.Request,
+                    method,
+                    path,
+                    requestResult.Violations
+                );
+            }
+        }
+
+        if ((direction & ValidationDirection.Response) != 0)
+        {
+            await InvokeWithResponseCaptureAsync(context, operation, method, path)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            await _next(context).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Installs the hold-back response body feature, invokes the rest of the pipeline, then validates the
+    /// captured response. On validation failure the exception is thrown before the body is replayed; on
+    /// success the buffer is committed to the real transport. The original feature is always restored in
+    /// the <see langword="finally"/> so the pipeline is left clean even on throw.
+    /// </summary>
+    private async Task InvokeWithResponseCaptureAsync(
+        HttpContext context,
+        OpenApiOperation operation,
+        string method,
+        string path
+    )
+    {
+        var options = _validator.Options;
+        var originalFeature = context.Features.Get<IHttpResponseBodyFeature>();
+
+        if (originalFeature is null)
+        {
+            // No response body feature means the host cannot capture a response; validate nothing and
+            // fall through to keep the application functional.
+            _logger.LogWarning(
+                "No IHttpResponseBodyFeature is present on the context; response validation is skipped."
+            );
+            await _next(context).ConfigureAwait(false);
+            return;
+        }
+
+        var holdback = new HoldBackResponseBodyFeature(
+            originalFeature,
+            options.MaxResponseBufferSizeBytes
+        );
+
+        try
+        {
+            context.Features.Set<IHttpResponseBodyFeature>(holdback);
+
+            await _next(context).ConfigureAwait(false);
+
+            if (holdback.BufferingDisabled)
+            {
+                throw new OpenApiContractValidationException(
+                    ContractPhase.Response,
+                    method,
+                    path,
+                    new[]
+                    {
+                        new ContractViolation(
+                            Location: "responseBody",
+                            InstanceLocation: null,
+                            Keyword: null,
+                            Expected: null,
+                            Actual: null,
+                            Message: "the response disabled buffering (streaming) and cannot be validated."
+                        ),
+                    }
+                );
+            }
+
+            var parsedResponse = BuildParsedResponse(context, holdback, method);
+            var responseResult = _validator.ValidateResponse(operation, parsedResponse);
+            if (!responseResult.IsValid)
+            {
+                // Throw BEFORE committing so the offending body never reaches the client.
+                throw new OpenApiContractValidationException(
+                    ContractPhase.Response,
+                    method,
+                    path,
+                    responseResult.Violations
+                );
+            }
+
+            // Valid: replay the buffered response to the real transport.
+            await holdback.CommitAsync(context.RequestAborted).ConfigureAwait(false);
+        }
+        finally
+        {
+            context.Features.Set(originalFeature);
+        }
+    }
+
+    /// <summary>
+    /// Reads and parses the incoming request body (when present and JSON), building a
+    /// <see cref="ParsedRequest"/> suitable for the framework-agnostic validator. The request stream is
+    /// rewound so downstream handlers see an unread body.
+    /// </summary>
+    private static async Task<ParsedRequest> BuildParsedRequestAsync(
+        HttpContext context,
+        string method,
+        string path
+    )
+    {
+        var request = context.Request;
+
+        string? rawBody = null;
+        JsonElement? body = null;
+
+        if (MayHaveBody(request))
+        {
+            request.EnableBuffering();
+            using var reader = new StreamReader(
+                request.Body,
+                Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: false,
+                bufferSize: 1024,
+                leaveOpen: true
+            );
+            rawBody = await reader.ReadToEndAsync().ConfigureAwait(false);
+            request.Body.Position = 0;
+
+            if (!string.IsNullOrEmpty(rawBody) && IsJsonContentType(request.ContentType))
+            {
+                body = TryParseJson(rawBody);
+            }
+        }
+
+        return new ParsedRequest
+        {
+            Method = method,
+            Path = path,
+            ContentType = request.ContentType,
+            QueryValues = ToQueryValues(request.Query),
+            Headers = ToHeaders(request.Headers),
+            Cookies = ToCookies(request.Cookies),
+            Body = body,
+            RawBody = rawBody,
+        };
+    }
+
+    /// <summary>
+    /// Builds a <see cref="ParsedResponse"/> from the response status, headers and the bytes captured by
+    /// the hold-back feature. HEAD responses never carry a body regardless of what was buffered.
+    /// </summary>
+    private static ParsedResponse BuildParsedResponse(
+        HttpContext context,
+        HoldBackResponseBodyFeature holdback,
+        string method
+    )
+    {
+        var response = context.Response;
+        var isHead = HttpMethods.IsHead(method);
+        var bufferedBytes = holdback.GetBufferedBytes();
+        var hasBody = !isHead && bufferedBytes.Length > 0;
+
+        string? rawBody = hasBody ? Encoding.UTF8.GetString(bufferedBytes) : null;
+        JsonElement? body = null;
+
+        if (hasBody && IsJsonContentType(response.ContentType))
+        {
+            body = TryParseJson(rawBody!);
+        }
+
+        return new ParsedResponse
+        {
+            StatusCode = response.StatusCode,
+            ContentType = response.ContentType,
+            Headers = ToHeaders(response.Headers),
+            Body = body,
+            RawBody = rawBody,
+            HasBody = hasBody,
+        };
+    }
+
+    private static bool MayHaveBody(HttpRequest request) =>
+        request.ContentLength is > 0 || !string.IsNullOrEmpty(request.ContentType);
+
+    private static bool IsJsonContentType(string? contentType) =>
+        contentType is not null
+        && contentType.Contains(JsonToken, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Parses JSON without throwing: a malformed body yields <see langword="null"/> so that downstream
+    /// schema validation flags the content mismatch precisely.
+    /// </summary>
+    private static JsonElement? TryParseJson(string text)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(text);
+            // Clone so the JsonElement outlives the disposed JsonDocument.
+            return document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Copies query parameters preserving each key's original casing; query names are matched
+    /// case-sensitively per OpenAPI, so the dictionary uses the default ordinal comparer.
+    /// </summary>
+    private static IReadOnlyDictionary<string, IReadOnlyList<string>> ToQueryValues(
+        IQueryCollection query
+    )
+    {
+        var result = new Dictionary<string, IReadOnlyList<string>>(query.Count);
+        foreach (var (key, values) in query)
+        {
+            result[key] = ToStringList(values);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Copies headers keyed case-insensitively (RFC 9110). Header name matching in the validators is
+    /// already case-insensitive, so this is the conventional choice.
+    /// </summary>
+    private static IReadOnlyDictionary<string, IReadOnlyList<string>> ToHeaders(
+        IHeaderDictionary headers
+    )
+    {
+        var result = new Dictionary<string, IReadOnlyList<string>>(
+            headers.Count,
+            StringComparer.OrdinalIgnoreCase
+        );
+        foreach (var (key, values) in headers)
+        {
+            result[key] = ToStringList(values);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Copies cookies keyed with the default ordinal comparer; cookie names are matched case-sensitively
+    /// per OpenAPI.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> ToCookies(IRequestCookieCollection cookies)
+    {
+        var result = new Dictionary<string, string>(cookies.Count);
+        foreach (var (key, value) in cookies)
+        {
+            result[key] = value;
+        }
+
+        return result;
+    }
+
+    private static IReadOnlyList<string> ToStringList(StringValues values)
+    {
+        if (values.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        if (values.Count == 1)
+        {
+            return new[] { values.ToString() };
+        }
+
+        var list = new List<string>(values.Count);
+        foreach (var value in values)
+        {
+            list.Add(value ?? string.Empty);
+        }
+
+        return list;
+    }
+}

@@ -1,0 +1,6 @@
+.direnv/
+bin/
+obj/
+artifacts/
+**/bin/
+**/obj/

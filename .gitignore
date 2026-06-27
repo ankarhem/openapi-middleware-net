@@ -1,0 +1,22 @@
+## Build output
+bin/
+obj/
+artifacts/
+TestResults/
+
+## User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Visual Studio
+.vs/
+.vscode/
+
+## JetBrains
+.idea/
+
+## OS
+.DS_Store
+Thumbs.db
