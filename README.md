@@ -29,10 +29,15 @@ spec, never less.
 This library is built for a **spec-first** workflow: author the OpenAPI document by hand, then
 validate the implementation against it.
 
-Generating the spec from code is fine for what the framework can **derive from your types** (request
-body shape, parameter names/types)—that part is circular, but harmless, since code and spec can't
-disagree there. The gap is everything that depends on **annotations**, which are *not enforced* and
-silently drift from the implementation:
+For the parts the framework can **derive from your types** (request body shape, parameter
+names/types), code and spec can't disagree—but that circularity isn't harmless. There's no separate
+contract artifact to review, so a model edit (rename a field, change a type, make something nullable)
+**silently changes the published API**: the diff looks like an ordinary code change, not a breaking
+contract change, and slips through review. With a hand-written spec, that same change must edit the
+spec file, surfacing as an explicit contract change.
+
+It gets worse for everything that depends on **annotations**, which are *not enforced* and silently
+drift from the implementation:
 
 - **Status codes** the handler returns but never declared (or declared but never returned).
 - **Error bodies** documented as `ProblemDetails`/`Error` but actually a bare string or different shape.
