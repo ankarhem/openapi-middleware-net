@@ -24,6 +24,49 @@ It is **maximally strict**: it enforces the contract *exactly as written* (for e
 `required`, and `additionalProperties: false` are honored precisely)—never more strictly than the
 spec, never less.
 
+## Why validate against a hand-written spec (not one generated from code)?
+
+This library is designed for a **spec-first** workflow: you author the OpenAPI document by hand and
+validate the implementation against it. That is deliberately the opposite of the common
+**code-first** approach, where the spec is generated from controllers, attributes, or reflection.
+
+Generating the spec from code makes the spec a *mirror* of the implementation. Validating against a
+generated spec is therefore close to circular—**the code is checked against a description of
+itself**, so it can never disagree:
+
+- **A generated spec can't catch the bug, because the bug generates the spec.** If a handler
+  returns the wrong shape, forgets a `required` field, or emits an undocumented status, the
+  generator faithfully writes *that* into the spec. The "contract" silently drifts to match the
+  defect, and a code-first validator sees no violation.
+- **The spec stops being a contract and becomes documentation of current behavior.** A contract is
+  a promise made *to consumers* that the code must honor. A generated spec is a report of whatever
+  the code happens to do today—useful, but it can't hold the code accountable.
+
+A **hand-written spec is an independent source of truth**, and that independence is exactly what
+makes runtime validation meaningful:
+
+- **It's a real, two-party check.** The spec and the implementation are produced separately, so
+  this middleware compares two independent artifacts. Any disagreement is a genuine signal:
+  either the code regressed or the spec needs an intentional, reviewed change.
+- **Breaking changes become visible and deliberate.** Because the spec is committed and
+  reviewed like any other interface, a change to it shows up in code review. With a generated
+  spec, a breaking change to your API can ship invisibly—the generator just regenerates a new
+  "contract" to match.
+- **The contract is designed, not derived.** You decide the shape consumers depend on—status
+  codes, nullability, `readOnly`/`writeOnly`, enums, examples—rather than inheriting whatever your
+  serializer, model attributes, or framework defaults happen to produce.
+- **It's framework- and refactor-independent.** A rename, a serializer setting, a new attribute, or
+  an upgrade can quietly change a generated spec. A hand-written spec only changes when *you* change
+  it, so refactors that accidentally alter the public contract are caught instead of absorbed.
+- **It enables true consumer-driven and design-first development.** Front-end teams, partners, and
+  mock servers can build against the agreed spec before the implementation exists; this middleware
+  then proves the implementation lives up to it.
+
+In short: **a generated spec asks "does my spec match my code?" (always yes). A hand-written spec
+validated at runtime asks "does my code match the contract I promised?"—the question that actually
+protects your consumers.** If you only need documentation, generate it. If you need a contract that
+can *fail the build* when the implementation drifts, write it by hand and enforce it here.
+
 ## Features
 
 - **Requests and responses** validated against the same contract.
