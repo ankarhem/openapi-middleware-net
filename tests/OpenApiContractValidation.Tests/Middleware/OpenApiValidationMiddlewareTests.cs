@@ -5,9 +5,12 @@ using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using OpenApiContractValidation.Errors;
 using OpenApiContractValidation.Middleware;
 using OpenApiContractValidation.Models;
@@ -93,6 +96,30 @@ public class OpenApiValidationMiddlewareTests
                       }
                     }
                   }
+                }
+              }
+            }
+          }
+        }
+        """;
+
+    /// <summary>
+    /// <c>HEAD /items/{id}</c> (integer path parameter) -> 200 with no declared response content. Used to
+    /// prove HEAD responses force <c>HasBody=false</c> so a body the terminal writes is never validated.
+    /// </summary>
+    private const string HeadContractJson = """
+        {
+          "openapi": "3.1.0",
+          "info": { "title": "head-tests", "version": "1.0.0" },
+          "paths": {
+            "/items/{id}": {
+              "head": {
+                "operationId": "headItem",
+                "parameters": [
+                  { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }
+                ],
+                "responses": {
+                  "200": { "description": "ok" }
                 }
               }
             }
@@ -238,6 +265,320 @@ public class OpenApiValidationMiddlewareTests
         AssertPhase(outcome, ContractPhase.Response);
     }
 
+    [Fact]
+    public async Task ValidateNone_PassesThrough_UndocumentedPathDoesNotThrow()
+    {
+        var outcome = await InvokeAsync(
+            request: () => new HttpRequestMessage(HttpMethod.Get, "/completely-undocumented"),
+            terminal: ctx =>
+            {
+                ctx.Response.StatusCode = 200;
+                return Task.CompletedTask;
+            },
+            direction: ValidationDirection.None
+        );
+
+        Assert.True(outcome.Exception is null, outcome.Exception?.Message ?? string.Empty);
+        Assert.NotNull(outcome.Response);
+        Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
+    }
+
+    [Fact]
+    public async Task ValidateRequestOnly_InvalidResponseNotValidated_ClientGetsBadBody()
+    {
+        var outcome = await InvokeAsync(
+            request: () => new HttpRequestMessage(HttpMethod.Get, "/users/1"),
+            terminal: async ctx =>
+            {
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync("""{"id":"notInt"}""");
+            },
+            direction: ValidationDirection.Request
+        );
+
+        Assert.True(outcome.Exception is null, outcome.Exception?.Message ?? string.Empty);
+        Assert.NotNull(outcome.Response);
+        Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
+        var body = await outcome.Response.Content.ReadAsStringAsync();
+        Assert.Contains("notInt", body);
+    }
+
+    [Fact]
+    public async Task ValidateResponseOnly_RequestBodyValidationSkipped_BadRequestBodyAccepted()
+    {
+        var outcome = await InvokeAsync(
+            request: () =>
+            {
+                var message = new HttpRequestMessage(HttpMethod.Post, "/users")
+                {
+                    Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+                };
+                return message;
+            },
+            terminal: async ctx =>
+            {
+                ctx.Response.StatusCode = 201;
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync("""{"id":2,"name":"y"}""");
+            },
+            direction: ValidationDirection.Response
+        );
+
+        Assert.True(outcome.Exception is null, outcome.Exception?.Message ?? string.Empty);
+        Assert.NotNull(outcome.Response);
+        Assert.Equal(HttpStatusCode.Created, outcome.Response!.StatusCode);
+    }
+
+    [Fact]
+    public async Task ResponseDisablesBuffering_ThrowsResponsePhase_Streaming()
+    {
+        RequestOutcome? outcome = null;
+        try
+        {
+            outcome = await InvokeAsync(
+                request: () => new HttpRequestMessage(HttpMethod.Get, "/users/1"),
+                terminal: ctx =>
+                {
+                    ctx.Features.GetRequiredFeature<IHttpResponseBodyFeature>().DisableBuffering();
+                    ctx.Response.StatusCode = 200;
+                    ctx.Response.ContentType = "application/json";
+                    return ctx.Response.WriteAsync("""{"id":1,"name":"x"}""");
+                },
+                direction: ValidationDirection.Both
+            );
+        }
+        catch (HttpRequestException)
+        {
+            // TestServer may fault the connection once the middleware throws after the response
+            // stream was handed to the transport in pass-through mode. The throw still happened.
+            Assert.Null(outcome);
+            return;
+        }
+
+        if (outcome!.Exception is not null)
+        {
+            Assert.Equal(ContractPhase.Response, outcome.Exception.Phase);
+            Assert.Contains("disabled buffering (streaming)", outcome.Exception.Message);
+        }
+        else
+        {
+            // Host rendered an error rather than rethrowing: the request must not have succeeded.
+            Assert.NotNull(outcome.Response);
+            Assert.NotEqual(HttpStatusCode.OK, outcome.Response!.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task NonJsonRequestBody_OnRequiredJsonOperation_ThrowsRequestPhase()
+    {
+        var outcome = await InvokeAsync(
+            request: () =>
+            {
+                var message = new HttpRequestMessage(HttpMethod.Post, "/users")
+                {
+                    Content = new StringContent("hi", Encoding.UTF8, "text/plain"),
+                };
+                return message;
+            },
+            terminal: _ => Task.CompletedTask,
+            direction: ValidationDirection.Both
+        );
+
+        AssertPhase(outcome, ContractPhase.Request);
+    }
+
+    [Fact]
+    public async Task MalformedJsonRequestBody_OnOperationWithoutDeclaredBody_PassesThrough()
+    {
+        // GET has no declared requestBody, so a present-but-unparseable JSON body yields Body=null but
+        // no body validation runs. Exercises the TryParseJson catch on the request side (line ~351).
+        var outcome = await InvokeAsync(
+            request: () =>
+            {
+                var message = new HttpRequestMessage(HttpMethod.Get, "/users/1")
+                {
+                    Content = new StringContent("{bad", Encoding.UTF8, "application/json"),
+                };
+                return message;
+            },
+            terminal: async ctx =>
+            {
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync("""{"id":1,"name":"x"}""");
+            },
+            direction: ValidationDirection.Both
+        );
+
+        Assert.True(outcome.Exception is null, outcome.Exception?.Message ?? string.Empty);
+        Assert.NotNull(outcome.Response);
+        Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
+    }
+
+    [Fact]
+    public async Task MalformedJsonResponseBody_InvalidJsonPassedThroughAsNullBody()
+    {
+        // TryParseJson catch on the response side yields Body=null; ResponseValidator treats a null body
+        // as "no schema instance to evaluate" and returns success, so the bad bytes reach the client.
+        var outcome = await InvokeAsync(
+            request: () => new HttpRequestMessage(HttpMethod.Get, "/users/1"),
+            terminal: async ctx =>
+            {
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync("{bad");
+            },
+            direction: ValidationDirection.Both
+        );
+
+        Assert.True(outcome.Exception is null, outcome.Exception?.Message ?? string.Empty);
+        Assert.NotNull(outcome.Response);
+        Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
+        var body = await outcome.Response.Content.ReadAsStringAsync();
+        Assert.Equal("{bad", body);
+    }
+
+    [Fact]
+    public async Task CookieHeader_OnDocumentedGet_PassesThrough()
+    {
+        var outcome = await InvokeAsync(
+            request: () =>
+            {
+                var message = new HttpRequestMessage(HttpMethod.Get, "/users/1");
+                message.Headers.Add("Cookie", "a=b");
+                return message;
+            },
+            terminal: async ctx =>
+            {
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync("""{"id":1,"name":"x"}""");
+            },
+            direction: ValidationDirection.Both
+        );
+
+        Assert.True(outcome.Exception is null, outcome.Exception?.Message ?? string.Empty);
+        Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
+    }
+
+    [Fact]
+    public async Task MultiValueQueryParameter_OnDocumentedGet_PassesThrough()
+    {
+        var outcome = await InvokeAsync(
+            request: () => new HttpRequestMessage(HttpMethod.Get, "/users/1?ids=1&ids=2"),
+            terminal: async ctx =>
+            {
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync("""{"id":1,"name":"x"}""");
+            },
+            direction: ValidationDirection.Both
+        );
+
+        Assert.True(outcome.Exception is null, outcome.Exception?.Message ?? string.Empty);
+        Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
+    }
+
+    [Fact]
+    public async Task HeadRequest_WrittenResponseBody_NotValidated()
+    {
+        // The HEAD operation declares a 200 with no content; if HasBody were true the ResponseValidator
+        // would flag "response body returned but none is documented". isHead forces HasBody=false, so the
+        // body the terminal writes is ignored and the response passes.
+        var outcome = await InvokeAsync(
+            request: () => new HttpRequestMessage(HttpMethod.Head, "/items/1"),
+            terminal: async ctx =>
+            {
+                ctx.Response.StatusCode = 200;
+                await ctx.Response.WriteAsync("body-that-must-be-ignored");
+            },
+            direction: ValidationDirection.Both,
+            contract: HeadContractJson
+        );
+
+        Assert.True(outcome.Exception is null, outcome.Exception?.Message ?? string.Empty);
+        Assert.NotNull(outcome.Response);
+        Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
+    }
+
+    [Fact]
+    public void Ctor_NullNext_ThrowsArgumentNull()
+    {
+        var ex = Assert.Throws<ArgumentNullException>(() =>
+            new OpenApiValidationMiddleware(
+                null!,
+                MakeValidator(),
+                NullLogger<OpenApiValidationMiddleware>.Instance
+            )
+        );
+        Assert.Equal("next", ex.ParamName);
+    }
+
+    [Fact]
+    public void Ctor_NullValidator_ThrowsArgumentNull()
+    {
+        var ex = Assert.Throws<ArgumentNullException>(() =>
+            new OpenApiValidationMiddleware(
+                _ => Task.CompletedTask,
+                null!,
+                NullLogger<OpenApiValidationMiddleware>.Instance
+            )
+        );
+        Assert.Equal("validator", ex.ParamName);
+    }
+
+    [Fact]
+    public void Ctor_NullLogger_ThrowsArgumentNull()
+    {
+        var ex = Assert.Throws<ArgumentNullException>(() =>
+            new OpenApiValidationMiddleware(_ => Task.CompletedTask, MakeValidator(), null!)
+        );
+        Assert.Equal("logger", ex.ParamName);
+    }
+
+    [Fact]
+    public async Task EmptyJsonRequestBody_OnRequiredBodyOperation_ThrowsRequestPhase()
+    {
+        // A body-less POST whose Content-Type is set makes MayHaveBody true, reads an empty rawBody and
+        // then short-circuits body parsing (!IsNullOrEmpty("") is false). Covers the empty-rawBody branch.
+        var outcome = await InvokeAsync(
+            request: () =>
+            {
+                var message = new HttpRequestMessage(HttpMethod.Post, "/users")
+                {
+                    Content = new StringContent("", Encoding.UTF8, "application/json"),
+                };
+                return message;
+            },
+            terminal: _ => Task.CompletedTask,
+            direction: ValidationDirection.Both
+        );
+
+        AssertPhase(outcome, ContractPhase.Request);
+    }
+
+    [Fact]
+    public async Task ResponseBodyWithoutContentType_IsJsonContentTypeNullBranch_Passes()
+    {
+        // A buffered response body whose ContentType is null drives IsJsonContentType(null) -> false, so
+        // the body stays unparsed and the content-type matcher (lenient on null) accepts it: the response
+        // passes. The goal is to exercise the null branch of IsJsonContentType on the response path.
+        var outcome = await InvokeAsync(
+            request: () => new HttpRequestMessage(HttpMethod.Get, "/users/1"),
+            terminal: async ctx =>
+            {
+                ctx.Response.StatusCode = 200;
+                await ctx.Response.WriteAsync("""{"id":1,"name":"x"}""");
+            },
+            direction: ValidationDirection.Both
+        );
+
+        Assert.True(outcome.Exception is null, outcome.Exception?.Message ?? string.Empty);
+        Assert.NotNull(outcome.Response);
+        Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
+    }
+
     /// <summary>
     /// The outcome of a single client invocation: either the validation middleware threw an
     /// <see cref="OpenApiContractValidationException"/> (TestServer rethrows unhandled exceptions by
@@ -257,6 +598,41 @@ public class OpenApiValidationMiddlewareTests
     private static async Task<RequestOutcome> InvokeAsync(
         Func<HttpRequestMessage> request,
         RequestDelegate terminal
+    ) =>
+        await InvokeAsyncCore(request, terminal, ValidationDirection.Both, ContractJson)
+            .ConfigureAwait(false);
+
+    /// <summary>
+    /// Builds a fresh host for a single invocation with an explicit <paramref name="direction"/> and
+    /// optional <paramref name="contract"/> (defaults to <see cref="ContractJson"/>).
+    /// </summary>
+    private static Task<RequestOutcome> InvokeAsync(
+        Func<HttpRequestMessage> request,
+        RequestDelegate terminal,
+        ValidationDirection direction,
+        string contract = ContractJson
+    ) => InvokeAsyncCore(request, terminal, direction, contract);
+
+    /// <summary>
+    /// Builds a standalone <see cref="OpenApiContractValidator"/> from <see cref="ContractJson"/> for the
+    /// direct constructor null-argument tests (which do not run the full host).
+    /// </summary>
+    private static OpenApiContractValidator MakeValidator() =>
+        new(
+            Microsoft.Extensions.Options.Options.Create(
+                new OpenApiValidationOptions
+                {
+                    ContractText = ContractJson,
+                    ContractFormat = "json",
+                }
+            )
+        );
+
+    private static async Task<RequestOutcome> InvokeAsyncCore(
+        Func<HttpRequestMessage> request,
+        RequestDelegate terminal,
+        ValidationDirection direction,
+        string contract
     )
     {
         var hostBuilder = new HostBuilder().ConfigureWebHost(webHost =>
@@ -265,8 +641,9 @@ public class OpenApiValidationMiddlewareTests
             webHost.ConfigureServices(services =>
                 services.AddOpenApiValidation(options =>
                 {
-                    options.ContractText = ContractJson;
+                    options.ContractText = contract;
                     options.ContractFormat = "json";
+                    options.Validate = direction;
                 })
             );
             webHost.Configure(app =>
