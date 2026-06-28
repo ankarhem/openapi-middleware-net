@@ -132,6 +132,18 @@ public class ContractSchemaRegistryTests
             "the same cache key must return the identical cached JsonSchema instance"
         );
     }
+
+    [Fact]
+    public void NullSchemaValue_IsSkipped_InBuildRootSchema()
+    {
+        var read = OpenApiDocument.Parse(ContractJson, "json", new OpenApiReaderSettings());
+        var doc = read.Document!;
+        doc.Components!.Schemas!.Add("NullEntry", null!);
+
+        var registry = new ContractSchemaRegistry(doc);
+
+        Assert.NotNull(registry.RootSchema);
+    }
 }
 
 public class RefRewriterTests
@@ -184,5 +196,30 @@ public class RefRewriterTests
         var allOf = doc.RootElement.GetProperty("allOf");
         Assert.Equal("#/$defs/A", allOf[0].GetProperty("$ref").GetString());
         Assert.Equal("https://example.com/other", allOf[1].GetProperty("$ref").GetString());
+    }
+
+    [Fact]
+    public void RewriteToAbsolute_EmptyBaseUri_UsesDefsPrefix()
+    {
+        const string input = """{ "$ref": "#/components/schemas/Node" }""";
+
+        var rewritten = RefRewriter.RewriteToAbsolute(input, "");
+
+        using var doc = JsonDocument.Parse(rewritten);
+        Assert.Equal("#/$defs/Node", doc.RootElement.GetProperty("$ref").GetString());
+    }
+
+    [Fact]
+    public void RewriteToAbsolute_BaseUriWithoutTrailingSlash_AddsSlash()
+    {
+        const string input = """{ "$ref": "#/components/schemas/Node" }""";
+
+        var rewritten = RefRewriter.RewriteToAbsolute(input, "https://example.com");
+
+        using var doc = JsonDocument.Parse(rewritten);
+        Assert.Equal(
+            "https://example.com/#/$defs/Node",
+            doc.RootElement.GetProperty("$ref").GetString()
+        );
     }
 }

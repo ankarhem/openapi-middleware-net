@@ -83,4 +83,39 @@ public class StatusMatcherTests
         Assert.True(matched);
         Assert.Equal("5XX", matchedKey);
     }
+
+    [Fact]
+    public void NullKey_IsIgnored()
+    {
+        var keys = new List<string> { null!, "200" };
+
+        var matched = StatusMatcher.TryMatch(200, keys, out var matchedKey);
+
+        Assert.True(matched);
+        Assert.Equal("200", matchedKey);
+    }
+
+    [Fact]
+    public void UnrecognizedThreeCharKey_IsIgnored()
+    {
+        // "ABC" has length 3 but is neither a valid range ("NXX") nor an exact code.
+        var keys = new[] { "ABC", "200" };
+
+        var matched = StatusMatcher.TryMatch(200, keys, out var matchedKey);
+
+        Assert.True(matched);
+        Assert.Equal("200", matchedKey);
+    }
+
+    [Fact]
+    public void NonThreeCharKey_IsIgnored()
+    {
+        // "OK" has length != 3 and is not "default", so it is unrecognized.
+        var keys = new[] { "OK", "200" };
+
+        var matched = StatusMatcher.TryMatch(200, keys, out var matchedKey);
+
+        Assert.True(matched);
+        Assert.Equal("200", matchedKey);
+    }
 }

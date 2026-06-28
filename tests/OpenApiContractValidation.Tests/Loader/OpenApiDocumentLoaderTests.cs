@@ -113,4 +113,109 @@ public class OpenApiDocumentLoaderTests
         Assert.Equal(ContractPhase.Startup, ex.Phase);
         Assert.NotEmpty(ex.Violations);
     }
+
+    [Fact]
+    public void LoadFromText_AutoDetectFormat_Parses()
+    {
+        var doc = _loader.LoadFromText(Json30, format: null);
+
+        Assert.NotNull(doc.Paths);
+        Assert.True(doc.Paths!.ContainsKey("/pets"));
+    }
+
+    [Fact]
+    public void LoadFromStream_Yaml_Works()
+    {
+        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(Yaml31));
+
+        var doc = _loader.LoadFromStream(stream, "yaml");
+
+        Assert.NotNull(doc.Paths);
+        Assert.True(doc.Paths!.ContainsKey("/items"));
+    }
+
+    [Fact]
+    public void LoadFromFile_YmlExtension_Works()
+    {
+        var tempFile = Path.Combine(Path.GetTempPath(), $"oapi-loader-{Guid.NewGuid():N}.yml");
+        try
+        {
+            File.WriteAllText(tempFile, Yaml31, Encoding.UTF8);
+
+            var doc = _loader.LoadFromFile(tempFile);
+
+            Assert.NotNull(doc.Paths);
+            Assert.True(doc.Paths!.ContainsKey("/items"));
+        }
+        finally
+        {
+            if (File.Exists(tempFile))
+            {
+                File.Delete(tempFile);
+            }
+        }
+    }
+
+    [Fact]
+    public void LoadFromFile_JsonExtension_Works()
+    {
+        var tempFile = Path.Combine(Path.GetTempPath(), $"oapi-loader-{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(tempFile, Json30, Encoding.UTF8);
+
+            var doc = _loader.LoadFromFile(tempFile);
+
+            Assert.NotNull(doc.Paths);
+            Assert.True(doc.Paths!.ContainsKey("/pets"));
+        }
+        finally
+        {
+            if (File.Exists(tempFile))
+            {
+                File.Delete(tempFile);
+            }
+        }
+    }
+
+    [Fact]
+    public void MalformedFromStream_ThrowsStartup()
+    {
+        using var stream = new MemoryStream(Encoding.UTF8.GetBytes("{ this is not valid openapi"));
+
+        var ex = Assert.Throws<OpenApiContractValidationException>(() =>
+            _loader.LoadFromStream(stream, "json")
+        );
+
+        Assert.Equal(ContractPhase.Startup, ex.Phase);
+        Assert.NotEmpty(ex.Violations);
+    }
+
+    [Fact]
+    public void MissingInfo_GuardThrows()
+    {
+        // The document parses (non-null) but has no Info section, triggering the guard.
+        const string noInfo = """{"openapi": "3.0.3", "paths": {}}""";
+
+        var ex = Assert.Throws<OpenApiContractValidationException>(() =>
+            _loader.LoadFromText(noInfo, "json")
+        );
+
+        Assert.Equal(ContractPhase.Startup, ex.Phase);
+        Assert.Contains(ex.Violations, v => v.Keyword == "required");
+        Assert.Contains(ex.Violations, v => v.Message != null && v.Message.Contains("info"));
+    }
+
+    [Fact]
+    public void MissingVersion_GuardThrows()
+    {
+        const string noVersion = """{"openapi": "3.0.3", "info": {"title": "T"}, "paths": {}}""";
+
+        var ex = Assert.Throws<OpenApiContractValidationException>(() =>
+            _loader.LoadFromText(noVersion, "json")
+        );
+
+        Assert.Equal(ContractPhase.Startup, ex.Phase);
+        Assert.Contains(ex.Violations, v => v.Keyword == "required");
+    }
 }

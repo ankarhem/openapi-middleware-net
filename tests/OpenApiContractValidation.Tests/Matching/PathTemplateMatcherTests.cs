@@ -93,4 +93,87 @@ public class PathTemplateMatcherTests
 
         Assert.False(matched);
     }
+
+    [Fact]
+    public void PathTemplate_ParameterNames_ReturnsDeclaredParameters()
+    {
+        var template = new PathTemplate("/users/{id}/posts/{postId}");
+
+        Assert.Equal(new[] { "id", "postId" }, template.ParameterNames);
+    }
+
+    [Fact]
+    public void PathTemplate_ParameterNames_EmptyWhenNoParams()
+    {
+        var template = new PathTemplate("/health");
+
+        Assert.Empty(template.ParameterNames);
+    }
+
+    [Fact]
+    public void PathTemplate_SpecificityKey_ReflectsLiteralVsParam()
+    {
+        var template = new PathTemplate("/users/{id}");
+
+        // ["", "users", "{id}"] → kinds [1, 1, 0] (literal, literal, parameter)
+        Assert.Equal(new[] { 1, 1, 0 }, template.SpecificityKey);
+    }
+
+    [Fact]
+    public void SpecificityComparer_SameReference_ReturnsZero()
+    {
+        var comparer = GetSpecificityComparer();
+        var template = new PathTemplate("/a");
+
+        Assert.Equal(0, comparer.Compare(template, template));
+    }
+
+    [Fact]
+    public void SpecificityComparer_NullX_ReturnsNegative()
+    {
+        var comparer = GetSpecificityComparer();
+        var template = new PathTemplate("/a");
+
+        Assert.True(comparer.Compare(null!, template) < 0);
+    }
+
+    [Fact]
+    public void SpecificityComparer_NullY_ReturnsPositive()
+    {
+        var comparer = GetSpecificityComparer();
+        var template = new PathTemplate("/a");
+
+        Assert.True(comparer.Compare(template, null!) > 0);
+    }
+
+    [Fact]
+    public void SpecificityComparer_DifferentSegmentCounts_PrefersMoreSegments()
+    {
+        var comparer = GetSpecificityComparer();
+        var longer = new PathTemplate("/a/b/c");
+        var shorter = new PathTemplate("/a/b");
+
+        Assert.True(comparer.Compare(longer, shorter) > 0);
+        Assert.True(comparer.Compare(shorter, longer) < 0);
+    }
+
+    [Fact]
+    public void SpecificityComparer_EqualTemplates_ReturnsZero()
+    {
+        var comparer = GetSpecificityComparer();
+        var a = new PathTemplate("/users/{id}");
+        var b = new PathTemplate("/users/{id}");
+
+        Assert.Equal(0, comparer.Compare(a, b));
+    }
+
+    private static IComparer<PathTemplate> GetSpecificityComparer()
+    {
+        var assembly = typeof(PathTemplateMatcher).Assembly;
+        var comparerType = assembly.GetType(
+            "OpenApiContractValidation.Matching.PathTemplateSpecificityComparer"
+        )!;
+        var instanceField = comparerType.GetField("Instance")!;
+        return (IComparer<PathTemplate>)instanceField.GetValue(null)!;
+    }
 }
