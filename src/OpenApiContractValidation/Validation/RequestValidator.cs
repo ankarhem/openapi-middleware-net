@@ -499,7 +499,15 @@ public sealed class RequestValidator
             return;
         }
 
-        var body = request.Body!.Value;
+        // Schema validation needs a parsed JSON body; a non-JSON body (e.g.
+        // application/octet-stream) passes the content-type check above but has no JSON
+        // instance to evaluate.
+        if (request.Body is null)
+        {
+            return;
+        }
+
+        var body = request.Body.Value;
 
         // Schema validation of the parsed body (native JSON types; no coercion needed).
         var compiled = _schemaRegistry.GetTargetSchema(
