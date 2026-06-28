@@ -2,6 +2,8 @@ using System.Globalization;
 using System.IO;
 using System.IO.Pipelines;
 using Microsoft.AspNetCore.Http.Features;
+using OpenApiContractValidation.Errors;
+using OpenApiContractValidation.Models;
 
 namespace OpenApiContractValidation.Middleware;
 
@@ -18,6 +20,7 @@ public sealed class HoldBackResponseBodyFeature : IHttpResponseBodyFeature, IAsy
 {
     private readonly IHttpResponseBodyFeature _inner;
     private readonly long _maxBufferSizeBytes;
+    private readonly bool _throwOnCapExceeded;
     private readonly MemoryStream _buffer;
     private CapStream? _capStream;
     private PipeWriter? _writer;
@@ -28,20 +31,32 @@ public sealed class HoldBackResponseBodyFeature : IHttpResponseBodyFeature, IAsy
     /// </summary>
     /// <param name="inner">The original response body feature provided by the host.</param>
     /// <param name="maxBufferSizeBytes">
-    /// The maximum number of bytes that will be buffered. Any write that would exceed this
-    /// limit throws <see cref="InvalidOperationException"/>.
+    /// The maximum number of bytes that will be buffered. A write that would exceed this limit is a
+    /// contract failure: see <paramref name="throwOnCapExceeded"/>.
+    /// </param>
+    /// <param name="throwOnCapExceeded">
+    /// When <see langword="true"/> (throw policy), exceeding the cap throws
+    /// <see cref="OpenApiContractValidationException"/> mid-write so the oversized, unvalidated response
+    /// is suppressed. When <see langword="false"/> (log policy), the feature switches to pass-through
+    /// (flushing what was buffered and streaming the rest) and sets <see cref="CapExceeded"/> so the
+    /// middleware can log and skip validation without failing the request.
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="inner"/> is <see langword="null"/>.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="maxBufferSizeBytes"/> is zero or negative.
     /// </exception>
-    public HoldBackResponseBodyFeature(IHttpResponseBodyFeature inner, long maxBufferSizeBytes)
+    public HoldBackResponseBodyFeature(
+        IHttpResponseBodyFeature inner,
+        long maxBufferSizeBytes,
+        bool throwOnCapExceeded = true
+    )
     {
         ArgumentNullException.ThrowIfNull(inner);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxBufferSizeBytes);
 
         _inner = inner;
         _maxBufferSizeBytes = maxBufferSizeBytes;
+        _throwOnCapExceeded = throwOnCapExceeded;
         _buffer = new MemoryStream();
     }
 
@@ -50,6 +65,12 @@ public sealed class HoldBackResponseBodyFeature : IHttpResponseBodyFeature, IAsy
     /// feature switched to pass-through mode.
     /// </summary>
     public bool BufferingDisabled { get; private set; }
+
+    /// <summary>
+    /// <see langword="true"/> once the response exceeded <c>maxBufferSizeBytes</c> under the log policy
+    /// and the feature switched to pass-through. The middleware uses this to log and skip validation.
+    /// </summary>
+    public bool CapExceeded { get; private set; }
 
     /// <summary>
     /// <see langword="true"/> once the buffered bytes have been replayed to the inner
@@ -288,17 +309,49 @@ public sealed class HoldBackResponseBodyFeature : IHttpResponseBodyFeature, IAsy
             return;
         }
 
+        // Once the cap has been exceeded under the log policy we are in pass-through: write straight
+        // to the inner stream so the rest of the (unvalidated) response still reaches the client.
+        if (CapExceeded)
+        {
+            _inner.Stream.Write(source);
+            return;
+        }
+
         if (_buffer.Length + source.Length > _maxBufferSizeBytes)
         {
-            throw new InvalidOperationException(
-                "The response exceeded validation buffer capacity (limit "
-                    + _maxBufferSizeBytes.ToString(CultureInfo.InvariantCulture)
-                    + " bytes)."
-            );
+            if (_throwOnCapExceeded)
+            {
+                throw CapExceededException();
+            }
+
+            // Log policy: stop buffering, flush what we have, and stream this and subsequent writes
+            // straight through. DisableBuffering() performs the flush + pass-through switch.
+            CapExceeded = true;
+            DisableBuffering();
+            _inner.Stream.Write(source);
+            return;
         }
 
         _buffer.Write(source);
     }
+
+    private OpenApiContractValidationException CapExceededException() =>
+        new(
+            ContractPhase.Response,
+            new[]
+            {
+                new ContractViolation(
+                    Location: "responseBody",
+                    InstanceLocation: null,
+                    Keyword: null,
+                    Expected: _maxBufferSizeBytes.ToString(CultureInfo.InvariantCulture) + " bytes",
+                    Actual: null,
+                    Message: "the response exceeded the validation buffer capacity (limit "
+                        + _maxBufferSizeBytes.ToString(CultureInfo.InvariantCulture)
+                        + " bytes) and cannot be validated."
+                ),
+            }
+        );
 
     /// <summary>
     /// A <see cref="Stream"/> that funnels every write into the in-memory buffer while

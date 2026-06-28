@@ -123,8 +123,8 @@ letting your handler render a clean error.
 
 ## Handling violations
 
-Every violation throws `OpenApiContractValidation.Errors.OpenApiContractValidationException`, which
-carries:
+By default a violation throws `OpenApiContractValidation.Errors.OpenApiContractValidationException`,
+which carries:
 
 - `Phase` — `ContractPhase.Startup`, `Request`, or `Response`.
 - `HttpMethod` and `Path`.
@@ -148,6 +148,23 @@ app.UseExceptionHandler(errApp => errApp.Run(async ctx =>
 }));
 ```
 
+### Log-only mode and the `OnViolation` hook
+
+Set `Handling = ViolationHandling.Log` to observe drift in production **without failing requests**:
+the violation is logged (and reported to `OnViolation`), the request still reaches the handler, and an
+invalid response is still delivered to the client. `OnViolation` runs for every violation regardless
+of `Handling`, so you can emit metrics or structured logs even while throwing:
+
+```csharp
+builder.Services.AddOpenApiValidation(options =>
+{
+    options.ContractFilePath = "openapi.yaml";
+    options.Handling = ViolationHandling.Log;          // log instead of throw (default: Throw)
+    options.OnViolation = ex =>                         // always invoked; for metrics/logging
+        metrics.Count("openapi.violation", ex.Phase, ex.Violations.Count);
+});
+```
+
 ## Configuration
 
 | Option | Default | Description |
@@ -156,19 +173,26 @@ app.UseExceptionHandler(errApp => errApp.Run(async ctx =>
 | `ContractStream` | `null` | Stream providing the OpenAPI document. |
 | `ContractText` | `null` | Inline OpenAPI document text. |
 | `ContractFormat` | `null` | Optional `"json"` / `"yaml"` hint. |
-| `Validate` | `Both` | `Request`, `Response`, or `Both`. |
-| `MaxResponseBufferSizeBytes` | `10 MiB` | Cap on the buffered response body; exceeding it throws. |
+| `Validate` | `Both` | `Request`, `Response`, `Both`, or `None`. |
+| `Handling` | `Throw` | `Throw` (fail on violation) or `Log` (log and continue). |
+| `OnViolation` | `null` | Optional `Action<OpenApiContractValidationException>` observer, invoked for every violation regardless of `Handling`. |
+| `MaxResponseBufferSizeBytes` | `10 MiB` | Cap on the buffered response body. Under `Throw` an over-cap response raises a (catchable) `OpenApiContractValidationException` and is suppressed; under `Log` it streams through unvalidated. |
 
 Exactly one contract source (`ContractFilePath`, `ContractStream`, or `ContractText`) must be set.
 
 ## Behavior and limitations
 
-- **Always throws** on a violation — there is no log-only mode by design.
-- **Streaming** responses are not validatable: an operation declaring `text/event-stream` is
-  rejected at **startup**, and a response that disables buffering at runtime throws.
-- **Large responses** beyond `MaxResponseBufferSizeBytes` throw rather than silently skipping
-  validation.
-- `204`/`304` responses and `HEAD` requests are validated for status/headers only (no body).
+- **Throws by default**, or logs and continues when `Handling = ViolationHandling.Log`. Either way
+  `OnViolation` is invoked for each violation.
+- **Streaming responses can't be validated** (OpenAPI 3.0/3.1 has no model for per-item streaming
+  bodies). Operations that declare `text/event-stream`, and responses that disable buffering at
+  runtime, are **skipped** (passed through unvalidated) rather than rejected — the app starts and
+  serves normally.
+- **Large responses** beyond `MaxResponseBufferSizeBytes` can't be fully buffered to validate: under
+  `Throw` the response is suppressed with a catchable `OpenApiContractValidationException`; under
+  `Log` it streams through unvalidated.
+- `204`/`304` responses and `HEAD` requests are validated for status/headers only (no body), per
+  RFC 9110 (those responses carry no body).
 - **Undocumented response headers** (e.g. `Date`, `Content-Length`) are *not* flagged—OpenAPI
   documents the headers an operation returns; it does not forbid transport headers.
 

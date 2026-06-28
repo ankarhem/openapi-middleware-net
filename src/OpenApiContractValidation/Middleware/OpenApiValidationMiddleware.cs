@@ -98,7 +98,7 @@ public sealed class OpenApiValidationMiddleware
 
         if (!pathExists)
         {
-            throw new OpenApiContractValidationException(
+            HandleViolation(
                 ContractPhase.Request,
                 method,
                 path,
@@ -114,11 +114,15 @@ public sealed class OpenApiValidationMiddleware
                     ),
                 }
             );
+
+            // Reached only under the log policy: no operation to validate against, so pass through.
+            await _next(context).ConfigureAwait(false);
+            return;
         }
 
         if (operation is null)
         {
-            throw new OpenApiContractValidationException(
+            HandleViolation(
                 ContractPhase.Request,
                 method,
                 path,
@@ -134,6 +138,16 @@ public sealed class OpenApiValidationMiddleware
                     ),
                 }
             );
+
+            await _next(context).ConfigureAwait(false);
+            return;
+        }
+
+        // Streaming operations cannot be buffered/validated; pass them through untouched.
+        if (_validator.IsStreamingOperation(operation))
+        {
+            await _next(context).ConfigureAwait(false);
+            return;
         }
 
         if ((direction & ValidationDirection.Request) != 0)
@@ -147,12 +161,8 @@ public sealed class OpenApiValidationMiddleware
             );
             if (!requestResult.IsValid)
             {
-                throw new OpenApiContractValidationException(
-                    ContractPhase.Request,
-                    method,
-                    path,
-                    requestResult.Violations
-                );
+                // Throw policy: throws. Log policy: logs and falls through to run the request anyway.
+                HandleViolation(ContractPhase.Request, method, path, requestResult.Violations);
             }
         }
 
@@ -196,7 +206,8 @@ public sealed class OpenApiValidationMiddleware
 
         var holdback = new HoldBackResponseBodyFeature(
             originalFeature,
-            options.MaxResponseBufferSizeBytes
+            options.MaxResponseBufferSizeBytes,
+            throwOnCapExceeded: options.Handling == ViolationHandling.Throw
         );
 
         try
@@ -205,46 +216,65 @@ public sealed class OpenApiValidationMiddleware
 
             await _next(context).ConfigureAwait(false);
 
-            if (holdback.BufferingDisabled)
+            // The response streamed (DisableBuffering) or exceeded the buffer cap under the log policy:
+            // it has already been written through to the client and cannot be validated. Skip.
+            if (holdback.BufferingDisabled || holdback.CapExceeded)
             {
-                throw new OpenApiContractValidationException(
-                    ContractPhase.Response,
+                _logger.LogDebug(
+                    "Response for {Method} {Path} could not be buffered (streaming or over the size cap); validation skipped.",
                     method,
-                    path,
-                    new[]
-                    {
-                        new ContractViolation(
-                            Location: "responseBody",
-                            InstanceLocation: null,
-                            Keyword: null,
-                            Expected: null,
-                            Actual: null,
-                            Message: "the response disabled buffering (streaming) and cannot be validated."
-                        ),
-                    }
+                    path
                 );
+                return;
             }
 
             var parsedResponse = BuildParsedResponse(context, holdback, method);
             var responseResult = _validator.ValidateResponse(operation, parsedResponse);
             if (!responseResult.IsValid)
             {
-                // Throw BEFORE committing so the offending body never reaches the client.
-                throw new OpenApiContractValidationException(
-                    ContractPhase.Response,
-                    method,
-                    path,
-                    responseResult.Violations
-                );
+                // Throw policy: throws BEFORE committing, so the offending body never reaches the
+                // client. Log policy: logs and falls through to commit the (invalid) response.
+                HandleViolation(ContractPhase.Response, method, path, responseResult.Violations);
             }
 
-            // Valid: replay the buffered response to the real transport.
+            // Valid (or log policy): replay the buffered response to the real transport.
             await holdback.CommitAsync(context.RequestAborted).ConfigureAwait(false);
         }
         finally
         {
             context.Features.Set(originalFeature);
         }
+    }
+
+    /// <summary>
+    /// Applies the configured <see cref="ViolationHandling"/> policy to a detected violation: it always
+    /// invokes <see cref="OpenApiValidationOptions.OnViolation"/> (when set), then either throws
+    /// <see cref="OpenApiContractValidationException"/> (<see cref="ViolationHandling.Throw"/>) or logs
+    /// and returns (<see cref="ViolationHandling.Log"/>), letting the caller continue.
+    /// </summary>
+    private void HandleViolation(
+        ContractPhase phase,
+        string method,
+        string path,
+        IReadOnlyList<ContractViolation> violations
+    )
+    {
+        var exception = new OpenApiContractValidationException(phase, method, path, violations);
+
+        _validator.Options.OnViolation?.Invoke(exception);
+
+        if (_validator.Options.Handling == ViolationHandling.Throw)
+        {
+            throw exception;
+        }
+
+        _logger.LogWarning(
+            "OpenAPI contract violation during {Phase} for {Method} {Path}: {Message}",
+            phase,
+            method,
+            path,
+            exception.Message
+        );
     }
 
     /// <summary>

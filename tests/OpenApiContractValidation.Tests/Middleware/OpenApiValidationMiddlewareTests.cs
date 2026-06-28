@@ -331,42 +331,26 @@ public class OpenApiValidationMiddlewareTests
     }
 
     [Fact]
-    public async Task ResponseDisablesBuffering_ThrowsResponsePhase_Streaming()
+    public async Task ResponseDisablesBuffering_Streaming_SkipsValidation_AndPassesThrough()
     {
-        RequestOutcome? outcome = null;
-        try
-        {
-            outcome = await InvokeAsync(
-                request: () => new HttpRequestMessage(HttpMethod.Get, "/users/1"),
-                terminal: ctx =>
-                {
-                    ctx.Features.GetRequiredFeature<IHttpResponseBodyFeature>().DisableBuffering();
-                    ctx.Response.StatusCode = 200;
-                    ctx.Response.ContentType = "application/json";
-                    return ctx.Response.WriteAsync("""{"id":1,"name":"x"}""");
-                },
-                direction: ValidationDirection.Both
-            );
-        }
-        catch (HttpRequestException)
-        {
-            // TestServer may fault the connection once the middleware throws after the response
-            // stream was handed to the transport in pass-through mode. The throw still happened.
-            Assert.Null(outcome);
-            return;
-        }
+        // A response that disables buffering (streaming) cannot be captured/validated. The middleware
+        // skips validation rather than failing, so the response reaches the client unchanged.
+        var outcome = await InvokeAsync(
+            request: () => new HttpRequestMessage(HttpMethod.Get, "/users/1"),
+            terminal: ctx =>
+            {
+                ctx.Features.GetRequiredFeature<IHttpResponseBodyFeature>().DisableBuffering();
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "application/json";
+                return ctx.Response.WriteAsync("""{"id":1,"name":"x"}""");
+            },
+            direction: ValidationDirection.Both
+        );
 
-        if (outcome!.Exception is not null)
-        {
-            Assert.Equal(ContractPhase.Response, outcome.Exception.Phase);
-            Assert.Contains("disabled buffering (streaming)", outcome.Exception.Message);
-        }
-        else
-        {
-            // Host rendered an error rather than rethrowing: the request must not have succeeded.
-            Assert.NotNull(outcome.Response);
-            Assert.NotEqual(HttpStatusCode.OK, outcome.Response!.StatusCode);
-        }
+        Assert.Null(outcome.Exception);
+        Assert.NotNull(outcome.Response);
+        Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
+        Assert.Contains("\"id\":1", await outcome.Response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -579,6 +563,144 @@ public class OpenApiValidationMiddlewareTests
         Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
     }
 
+    [Fact]
+    public async Task LogPolicy_RequestViolation_DoesNotThrow_AndReachesHandler()
+    {
+        var handlerRan = false;
+
+        var outcome = await InvokeWithOptions(
+            request: () =>
+                new HttpRequestMessage(HttpMethod.Post, "/users")
+                {
+                    // Missing required "name": a request violation.
+                    Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+                },
+            terminal: ctx =>
+            {
+                handlerRan = true;
+                ctx.Response.StatusCode = 201;
+                ctx.Response.ContentType = "application/json";
+                return ctx.Response.WriteAsync("""{"id":1,"name":"x"}""");
+            },
+            configure: o => o.Handling = ViolationHandling.Log
+        );
+
+        Assert.Null(outcome.Exception);
+        Assert.True(handlerRan, "log policy must let the request reach the handler");
+        Assert.Equal(HttpStatusCode.Created, outcome.Response!.StatusCode);
+    }
+
+    [Fact]
+    public async Task LogPolicy_ResponseViolation_DoesNotThrow_AndDeliversInvalidBody()
+    {
+        var outcome = await InvokeWithOptions(
+            request: () => new HttpRequestMessage(HttpMethod.Get, "/users/1"),
+            terminal: ctx =>
+            {
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "application/json";
+                // "id" should be an integer: a response schema violation.
+                return ctx.Response.WriteAsync("""{"id":"not-an-int","name":"x"}""");
+            },
+            configure: o => o.Handling = ViolationHandling.Log
+        );
+
+        Assert.Null(outcome.Exception);
+        Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
+        Assert.Contains("not-an-int", await outcome.Response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task OnViolation_Callback_IsInvoked_WithViolationDetails()
+    {
+        OpenApiContractValidationException? observed = null;
+
+        var outcome = await InvokeWithOptions(
+            request: () => new HttpRequestMessage(HttpMethod.Get, "/not/in/spec"),
+            terminal: ctx =>
+            {
+                ctx.Response.StatusCode = 200;
+                return Task.CompletedTask;
+            },
+            configure: o =>
+            {
+                o.Handling = ViolationHandling.Log;
+                o.OnViolation = ex => observed = ex;
+            }
+        );
+
+        Assert.Null(outcome.Exception);
+        Assert.NotNull(observed);
+        Assert.Equal(ContractPhase.Request, observed!.Phase);
+        Assert.Contains(observed.Violations, v => v.Location == "path");
+    }
+
+    [Fact]
+    public async Task OnViolation_Callback_RunsEvenUnderThrowPolicy()
+    {
+        OpenApiContractValidationException? observed = null;
+
+        var outcome = await InvokeWithOptions(
+            request: () => new HttpRequestMessage(HttpMethod.Get, "/not/in/spec"),
+            terminal: ctx =>
+            {
+                ctx.Response.StatusCode = 200;
+                return Task.CompletedTask;
+            },
+            configure: o =>
+            {
+                o.Handling = ViolationHandling.Throw;
+                o.OnViolation = ex => observed = ex;
+            }
+        );
+
+        // Throw policy: the middleware threw (TestServer rethrows), and the observer still ran first.
+        Assert.NotNull(outcome.Exception);
+        Assert.NotNull(observed);
+        Assert.Same(outcome.Exception, observed);
+    }
+
+    [Fact]
+    public async Task StreamingOperation_IsSkipped_AndPassesThroughUnvalidated()
+    {
+        const string streamingContract = """
+            {
+              "openapi": "3.1.0",
+              "info": { "title": "t", "version": "1" },
+              "paths": {
+                "/events": {
+                  "get": {
+                    "operationId": "getEvents",
+                    "responses": {
+                      "200": {
+                        "description": "ok",
+                        "content": { "text/event-stream": {} }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        var outcome = await InvokeAsync(
+            request: () => new HttpRequestMessage(HttpMethod.Get, "/events"),
+            terminal: ctx =>
+            {
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "text/event-stream";
+                // Not JSON; would fail schema validation if the op were not skipped.
+                return ctx.Response.WriteAsync("data: hello\n\n");
+            },
+            direction: ValidationDirection.Both,
+            contract: streamingContract
+        );
+
+        Assert.Null(outcome.Exception);
+        Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
+        Assert.Contains("data: hello", await outcome.Response.Content.ReadAsStringAsync());
+    }
+
     /// <summary>
     /// The outcome of a single client invocation: either the validation middleware threw an
     /// <see cref="OpenApiContractValidationException"/> (TestServer rethrows unhandled exceptions by
@@ -628,11 +750,39 @@ public class OpenApiValidationMiddlewareTests
             )
         );
 
-    private static async Task<RequestOutcome> InvokeAsyncCore(
+    /// <summary>
+    /// Builds a host whose validation options are configured by <paramref name="configure"/>, so tests can
+    /// exercise <see cref="ViolationHandling"/> and <see cref="OpenApiValidationOptions.OnViolation"/>.
+    /// </summary>
+    private static Task<RequestOutcome> InvokeWithOptions(
+        Func<HttpRequestMessage> request,
+        RequestDelegate terminal,
+        Action<OpenApiValidationOptions> configure
+    ) => InvokeAsyncCore(request, terminal, ContractJson, configure);
+
+    private static Task<RequestOutcome> InvokeAsyncCore(
         Func<HttpRequestMessage> request,
         RequestDelegate terminal,
         ValidationDirection direction,
         string contract
+    ) =>
+        InvokeAsyncCore(
+            request,
+            terminal,
+            contract,
+            options =>
+            {
+                options.ContractText = contract;
+                options.ContractFormat = "json";
+                options.Validate = direction;
+            }
+        );
+
+    private static async Task<RequestOutcome> InvokeAsyncCore(
+        Func<HttpRequestMessage> request,
+        RequestDelegate terminal,
+        string contract,
+        Action<OpenApiValidationOptions> configure
     )
     {
         var hostBuilder = new HostBuilder().ConfigureWebHost(webHost =>
@@ -643,7 +793,7 @@ public class OpenApiValidationMiddlewareTests
                 {
                     options.ContractText = contract;
                     options.ContractFormat = "json";
-                    options.Validate = direction;
+                    configure(options);
                 })
             );
             webHost.Configure(app =>

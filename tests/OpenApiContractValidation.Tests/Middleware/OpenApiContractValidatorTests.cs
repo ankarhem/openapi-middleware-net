@@ -281,25 +281,36 @@ public class OpenApiContractValidatorTests
     }
 
     [Fact]
-    public void Ctor_StreamingRequestBody_ThrowsStartup()
+    public void Ctor_StreamingRequestBody_ConstructsOk_AndMarksOperationStreaming()
     {
-        var ex = Assert.Throws<OpenApiContractValidationException>(() =>
-            Create(StreamingRequestBodyContractJson)
-        );
+        var validator = Create(StreamingRequestBodyContractJson);
 
-        Assert.Equal(ContractPhase.Startup, ex.Phase);
-        Assert.Contains("Streaming content type", ex.Message);
+        validator.TryResolveOperation("POST", "/stream", out var operation, out _, out _);
+
+        Assert.NotNull(operation);
+        Assert.True(validator.IsStreamingOperation(operation!));
     }
 
     [Fact]
-    public void Ctor_StreamingResponse_ThrowsStartup()
+    public void Ctor_StreamingResponse_ConstructsOk_AndMarksOperationStreaming()
     {
-        var ex = Assert.Throws<OpenApiContractValidationException>(() =>
-            Create(StreamingResponseContractJson)
-        );
+        var validator = Create(StreamingResponseContractJson);
 
-        Assert.Equal(ContractPhase.Startup, ex.Phase);
-        Assert.Contains("Streaming content type", ex.Message);
+        validator.TryResolveOperation("GET", "/stream", out var operation, out _, out _);
+
+        Assert.NotNull(operation);
+        Assert.True(validator.IsStreamingOperation(operation!));
+    }
+
+    [Fact]
+    public void IsStreamingOperation_NonStreamingOperation_ReturnsFalse()
+    {
+        var validator = Create(BaseContractJson);
+
+        validator.TryResolveOperation("GET", "/users/1", out var operation, out _, out _);
+
+        Assert.NotNull(operation);
+        Assert.False(validator.IsStreamingOperation(operation!));
     }
 
     [Fact]

@@ -2,7 +2,9 @@ using System.IO;
 using System.IO.Pipelines;
 using System.Text;
 using Microsoft.AspNetCore.Http.Features;
+using OpenApiContractValidation.Errors;
 using OpenApiContractValidation.Middleware;
+using OpenApiContractValidation.Models;
 using Xunit;
 
 namespace OpenApiContractValidation.Tests.Middleware;
@@ -113,18 +115,43 @@ public class HoldBackResponseBodyFeatureTests
     }
 
     [Fact]
-    public async Task ExceedingCap_Throws()
+    public async Task ExceedingCap_ThrowPolicy_ThrowsContractException()
     {
         var fake = new FakeResponseBodyFeature();
-        await using var feature = new HoldBackResponseBodyFeature(fake, maxBufferSizeBytes: 8);
+        await using var feature = new HoldBackResponseBodyFeature(
+            fake,
+            maxBufferSizeBytes: 8,
+            throwOnCapExceeded: true
+        );
 
         byte[] big = new byte[100];
 
-        var ex = Assert.Throws<InvalidOperationException>(() =>
+        var ex = Assert.Throws<OpenApiContractValidationException>(() =>
             feature.Stream.Write(big, 0, big.Length)
         );
 
-        Assert.Contains("response exceeded validation buffer", ex.Message);
+        Assert.Equal(ContractPhase.Response, ex.Phase);
+        Assert.Contains(ex.Violations, v => v.Location == "responseBody");
+        // Nothing reached the client: the oversized response is suppressed.
+        Assert.Equal(0, fake.Inner.Length);
+    }
+
+    [Fact]
+    public async Task ExceedingCap_LogPolicy_SwitchesToPassThrough()
+    {
+        var fake = new FakeResponseBodyFeature();
+        await using var feature = new HoldBackResponseBodyFeature(
+            fake,
+            maxBufferSizeBytes: 8,
+            throwOnCapExceeded: false
+        );
+
+        byte[] big = new byte[100];
+
+        feature.Stream.Write(big, 0, big.Length);
+
+        Assert.True(feature.CapExceeded);
+        Assert.Equal(big.Length, fake.Inner.Length);
     }
 
     [Fact]
@@ -444,18 +471,22 @@ public class HoldBackResponseBodyFeatureTests
     }
 
     [Fact]
-    public async Task ExceedingCap_ViaWriterPath_Throws()
+    public async Task ExceedingCap_ViaWriterPath_ThrowsContractException()
     {
         var fake = new FakeResponseBodyFeature();
-        var feature = new HoldBackResponseBodyFeature(fake, maxBufferSizeBytes: 8);
+        var feature = new HoldBackResponseBodyFeature(
+            fake,
+            maxBufferSizeBytes: 8,
+            throwOnCapExceeded: true
+        );
 
         byte[] big = new byte[100];
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var ex = await Assert.ThrowsAsync<OpenApiContractValidationException>(() =>
             feature.Writer.WriteAsync(big).AsTask()
         );
 
-        Assert.Contains("response exceeded validation buffer", ex.Message);
+        Assert.Equal(ContractPhase.Response, ex.Phase);
     }
 
     [Fact]

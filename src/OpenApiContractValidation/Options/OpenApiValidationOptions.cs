@@ -1,4 +1,5 @@
 using System.IO;
+using OpenApiContractValidation.Errors;
 
 namespace OpenApiContractValidation.Options;
 
@@ -27,4 +28,17 @@ public sealed class OpenApiValidationOptions
 
     /// <summary>Which directions (request and/or response) are validated.</summary>
     public ValidationDirection Validate { get; set; } = ValidationDirection.Both;
+
+    /// <summary>
+    /// What to do when a violation is detected: <see cref="ViolationHandling.Throw"/> (default) or
+    /// <see cref="ViolationHandling.Log"/>.
+    /// </summary>
+    public ViolationHandling Handling { get; set; } = ViolationHandling.Throw;
+
+    /// <summary>
+    /// An optional observer invoked for every detected violation, regardless of <see cref="Handling"/>,
+    /// before the handling policy is applied. Use it to log, emit metrics, or inspect violations. It does
+    /// not affect whether the middleware throws.
+    /// </summary>
+    public Action<OpenApiContractValidationException>? OnViolation { get; set; }
 }

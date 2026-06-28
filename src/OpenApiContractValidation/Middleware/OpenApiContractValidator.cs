@@ -41,6 +41,7 @@ public sealed class OpenApiContractValidator
     private readonly RequestValidator _requestValidator;
     private readonly ResponseValidator _responseValidator;
     private readonly PathTemplateMatcher _pathMatcher;
+    private readonly HashSet<OpenApiOperation> _streamingOperations;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="OpenApiContractValidator"/> class, loading and
@@ -52,7 +53,8 @@ public sealed class OpenApiContractValidator
     /// </param>
     /// <exception cref="OpenApiContractValidationException">
     /// Thrown in the <see cref="ContractPhase.Startup"/> phase when no contract source is configured,
-    /// the contract cannot be parsed, or it declares an unsupported streaming content type.
+    /// or the contract cannot be parsed. Operations declaring a streaming content type are recorded and
+    /// skipped at request time rather than rejected here (see <see cref="IsStreamingOperation"/>).
     /// </exception>
     public OpenApiContractValidator(IOptions<OpenApiValidationOptions> options)
     {
@@ -70,7 +72,7 @@ public sealed class OpenApiContractValidator
             );
         }
 
-        RejectStreamingContent(_document);
+        _streamingOperations = CollectStreamingOperations(_document);
 
         _schemaRegistry = new ContractSchemaRegistry(_document);
         _requestValidator = new RequestValidator(_schemaRegistry);
@@ -80,6 +82,16 @@ public sealed class OpenApiContractValidator
 
     /// <summary>The bound options that configured this validator.</summary>
     public OpenApiValidationOptions Options => _options;
+
+    /// <summary>
+    /// Indicates whether the given operation declares a streaming media type
+    /// (<c>text/event-stream</c>) for its request or response content. Such operations cannot be
+    /// buffered and schema-validated, so the middleware skips them rather than failing.
+    /// </summary>
+    /// <param name="operation">The matched operation.</param>
+    /// <returns><see langword="true"/> if the operation is streaming and validation must be skipped.</returns>
+    public bool IsStreamingOperation(OpenApiOperation operation) =>
+        _streamingOperations.Contains(operation);
 
     /// <summary>
     /// Resolves the <see cref="OpenApiOperation"/> (if any) that handles
@@ -215,12 +227,14 @@ public sealed class OpenApiContractValidator
     }
 
     /// <summary>
-    /// Rejects any operation whose declared request or response content declares the streaming media
-    /// type <c>text/event-stream</c>. Streaming bodies cannot be buffered whole and therefore cannot be
-    /// schema-validated; surfacing this at startup avoids per-request surprises.
+    /// Collects the operations whose declared request or response content uses the streaming media type
+    /// <c>text/event-stream</c>. Streaming bodies cannot be buffered whole and therefore cannot be
+    /// schema-validated, so the middleware skips these operations rather than failing the request.
     /// </summary>
-    private static void RejectStreamingContent(OpenApiDocument document)
+    private static HashSet<OpenApiOperation> CollectStreamingOperations(OpenApiDocument document)
     {
+        var streaming = new HashSet<OpenApiOperation>();
+
         foreach (var pathPair in document.Paths)
         {
             if (pathPair.Value?.Operations is null)
@@ -238,33 +252,27 @@ public sealed class OpenApiContractValidator
 
                 if (HasStreamingContent(operation.RequestBody?.Content?.Keys))
                 {
-                    throw new OpenApiContractValidationException(
-                        ContractPhase.Startup,
-                        SingleViolation(
-                            $"requestBody/{pathPair.Key}/{operationPair.Key}",
-                            $"Streaming content type '{StreamingMediaType}' is not supported for validation."
-                        )
-                    );
+                    streaming.Add(operation);
+                    continue;
                 }
 
-                if (operation.Responses is not null)
+                if (operation.Responses is null)
                 {
-                    foreach (var responsePair in operation.Responses)
+                    continue;
+                }
+
+                foreach (var responsePair in operation.Responses)
+                {
+                    if (HasStreamingContent(responsePair.Value?.Content?.Keys))
                     {
-                        if (HasStreamingContent(responsePair.Value?.Content?.Keys))
-                        {
-                            throw new OpenApiContractValidationException(
-                                ContractPhase.Startup,
-                                SingleViolation(
-                                    $"response/{pathPair.Key}/{operationPair.Key}/{responsePair.Key}",
-                                    $"Streaming content type '{StreamingMediaType}' is not supported for validation."
-                                )
-                            );
-                        }
+                        streaming.Add(operation);
+                        break;
                     }
                 }
             }
         }
+
+        return streaming;
     }
 
     private static bool HasStreamingContent(IEnumerable<string?>? mediaTypeKeys)
