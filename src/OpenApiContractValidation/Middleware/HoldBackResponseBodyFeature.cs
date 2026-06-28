@@ -162,11 +162,8 @@ public sealed class HoldBackResponseBodyFeature : IHttpResponseBodyFeature, IAsy
         long remaining = count ?? -1;
         while (remaining != 0)
         {
+            // remaining is never 0 here (loop guard), so toRead is always >= 1.
             int toRead = remaining < 0 ? BufferSize : (int)Math.Min(remaining, BufferSize);
-            if (toRead == 0)
-            {
-                break;
-            }
 
             int read = await fileStream
                 .ReadAsync(chunk.AsMemory(0, toRead), cancellationToken)
