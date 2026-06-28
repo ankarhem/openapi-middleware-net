@@ -334,6 +334,33 @@ public class HoldBackResponseBodyFeatureTests
     }
 
     [Fact]
+    public async Task SendFileAsync_WithZeroCount_BuffersNothing()
+    {
+        // count: 0 makes `remaining = 0`, so the copy loop never starts. (The defensive
+        // `if (toRead == 0) break;` at lines 167-168 is unreachable: the loop guard
+        // `while (remaining != 0)` already excludes the only state in which toRead is 0.)
+        var fake = new FakeResponseBodyFeature();
+        await using var feature = new HoldBackResponseBodyFeature(fake, maxBufferSizeBytes: 1024);
+
+        byte[] content = Encoding.UTF8.GetBytes("ABCDEFGH");
+        string tmp = Path.GetTempFileName();
+        File.WriteAllBytes(tmp, content);
+
+        try
+        {
+            await feature.SendFileAsync(tmp, 0, count: 0, default);
+
+            Assert.Equal(0, feature.BufferedLength);
+            Assert.Empty(feature.GetBufferedBytes());
+            Assert.Equal(0, fake.Inner.Length);
+        }
+        finally
+        {
+            File.Delete(tmp);
+        }
+    }
+
+    [Fact]
     public async Task DisableBuffering_CalledTwice_IsIdempotent()
     {
         var fake = new FakeResponseBodyFeature();

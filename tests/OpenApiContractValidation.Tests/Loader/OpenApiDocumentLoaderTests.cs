@@ -218,4 +218,34 @@ public class OpenApiDocumentLoaderTests
         Assert.Equal(ContractPhase.Startup, ex.Phase);
         Assert.Contains(ex.Violations, v => v.Keyword == "required");
     }
+
+    [Fact]
+    public void MalformedJsonArray_NullDocumentWithErrors_ThrowsStartup()
+    {
+        // Unreachable-code note: lines 115-126 (document is null && violations.Count == 0)
+        // cannot be hit through the public API — Microsoft.OpenApi 2.9.0 always records
+        // diagnostic errors when it fails to produce a document, and unparseable input
+        // throws out of OpenApiDocument.Parse before Validate runs. "[" reaches Validate
+        // with a null document and one diagnostic error, exercising the adjacent path.
+        using var stream = new MemoryStream(Encoding.UTF8.GetBytes("["));
+
+        var ex = Assert.Throws<OpenApiContractValidationException>(() =>
+            _loader.LoadFromStream(stream, "json")
+        );
+
+        Assert.Equal(ContractPhase.Startup, ex.Phase);
+        Assert.NotEmpty(ex.Violations);
+        Assert.Contains(ex.Violations, v => v.Location == "document");
+    }
+
+    [Fact]
+    public void LoadFromStream_AutoDetectFormat_Parses()
+    {
+        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(Json30));
+
+        var doc = _loader.LoadFromStream(stream, format: null);
+
+        Assert.NotNull(doc.Paths);
+        Assert.True(doc.Paths!.ContainsKey("/pets"));
+    }
 }
