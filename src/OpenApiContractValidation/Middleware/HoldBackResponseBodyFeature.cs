@@ -335,8 +335,10 @@ public sealed class HoldBackResponseBodyFeature : IHttpResponseBodyFeature, IAsy
         _buffer.Write(source);
     }
 
-    private OpenApiContractValidationException CapExceededException() =>
-        new(
+    private OpenApiContractValidationException CapExceededException()
+    {
+        var limit = _maxBufferSizeBytes.ToString(CultureInfo.InvariantCulture) + " bytes";
+        return new(
             ContractPhase.Response,
             new[]
             {
@@ -344,14 +346,13 @@ public sealed class HoldBackResponseBodyFeature : IHttpResponseBodyFeature, IAsy
                     Location: "responseBody",
                     InstanceLocation: null,
                     Keyword: null,
-                    Expected: _maxBufferSizeBytes.ToString(CultureInfo.InvariantCulture) + " bytes",
+                    Expected: limit,
                     Actual: null,
-                    Message: "the response exceeded the validation buffer capacity (limit "
-                        + _maxBufferSizeBytes.ToString(CultureInfo.InvariantCulture)
-                        + " bytes) and cannot be validated."
+                    Message: $"the response exceeded the validation buffer capacity (limit {limit}) and cannot be validated."
                 ),
             }
         );
+    }
 
     /// <summary>
     /// A <see cref="Stream"/> that funnels every write into the in-memory buffer while

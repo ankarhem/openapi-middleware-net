@@ -1,7 +1,6 @@
 using System.Text.Json.Nodes;
 using Microsoft.OpenApi;
 using Microsoft.OpenApi.Reader;
-using OpenApiContractValidation.Errors;
 using OpenApiContractValidation.Validation;
 using Xunit;
 

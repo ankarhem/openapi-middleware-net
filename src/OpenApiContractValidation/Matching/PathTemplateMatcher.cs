@@ -94,7 +94,6 @@ internal sealed class PathTemplateSpecificityComparer : IComparer<PathTemplate>
     /// <summary>Singleton comparer instance.</summary>
     public static readonly PathTemplateSpecificityComparer Instance = new();
 
-    /// <summary>Initializes the singleton comparer.</summary>
     private PathTemplateSpecificityComparer() { }
 
     /// <summary>
@@ -132,7 +131,7 @@ internal sealed class PathTemplateSpecificityComparer : IComparer<PathTemplate>
             return lengthComparison;
         }
 
-        var common = Math.Min(xKey.Count, yKey.Count);
+        var common = xKey.Count;
         for (var i = 0; i < common; i++)
         {
             var segmentComparison = xKey[i].CompareTo(yKey[i]);

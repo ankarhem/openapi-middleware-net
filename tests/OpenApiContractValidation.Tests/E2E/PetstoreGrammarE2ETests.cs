@@ -89,9 +89,7 @@ public sealed class PetstoreGrammarE2ETests
             return Task.CompletedTask;
         };
 
-    // ---------------------------------------------------------------------------------------------
     // /pet  (PUT updatePet, POST addPet)
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task PutPet_UpdateValidPet_Happy()
@@ -154,9 +152,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Contains(ex.Violations, v => v.Location == "requestBody/contentType");
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /pet/findByStatus  (GET)  — query enum [available,pending,sold]; array-of-Pet response
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task FindByStatus_Happy()
@@ -170,9 +166,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /pet/findByTags  (GET)  — exploded array query (?tags=a&tags=b); array-of-Pet response
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task FindByTags_ExplodedArrayQuery_Happy()
@@ -204,9 +198,7 @@ public sealed class PetstoreGrammarE2ETests
         );
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /pet/{petId}  (GET)  — int64 path param; json + xml response content-types
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task GetPetById_XmlResponse_Happy()
@@ -226,9 +218,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Equal("application/xml", outcome.Response.Content.Headers.ContentType!.MediaType);
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /pet/{petId}  (POST updatePetWithForm)  — int64 path + string query name & status
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task UpdatePetWithForm_Happy()
@@ -242,9 +232,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /pet/{petId}  (DELETE deletePet)  — HEADER param api_key (string) + 200 no-content
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task DeletePet_ApiKeyHeader_NoContent200_Happy()
@@ -260,9 +248,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /pet/{petId}/uploadImage  (POST uploadFile)  — octet-stream request body; ApiResponse response
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task UploadImage_NoBody_Happy()
@@ -311,9 +297,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /store/inventory  (GET)  — additionalProperties:{integer} map response
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task StoreInventory_AdditionalPropertiesMap_Happy()
@@ -341,9 +325,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Contains(ex.Violations, v => v.InstanceLocation == "/available");
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /store/order  (POST placeOrder)  — Order body (date-time format, enum status, boolean complete)
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task PlaceOrder_Happy()
@@ -410,9 +392,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Contains(ex.Violations, v => v.InstanceLocation == "/status");
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /store/order/{orderId}  (GET, DELETE)  — int64 path param
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task GetOrderById_Happy()
@@ -463,9 +443,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Contains(ex.Violations, v => v.Location == "path/orderId");
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /user  (POST createUser)  — User body
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task CreateUser_Happy()
@@ -480,9 +458,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /user/createWithList  (POST)  — application/json ARRAY of User request body
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task CreateWithList_ArrayRequestBody_Happy()
@@ -501,9 +477,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Equal(HttpStatusCode.OK, outcome.Response!.StatusCode);
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /user/login  (GET)  — username + password query params; SCALAR string response body
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task LoginUser_ScalarStringResponse_Happy()
@@ -533,9 +507,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Contains(ex.Violations, v => v.InstanceLocation == "");
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /user/logout  (GET)  — 200 no-content
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task LogoutUser_NoContent200_Happy()
@@ -562,9 +534,7 @@ public sealed class PetstoreGrammarE2ETests
         Assert.Contains(ex.Violations, v => v.Location == "responseBody");
     }
 
-    // ---------------------------------------------------------------------------------------------
     // /user/{username}  (GET, PUT, DELETE)  — string path param
-    // ---------------------------------------------------------------------------------------------
 
     [Fact]
     public async Task GetUserByName_Happy()

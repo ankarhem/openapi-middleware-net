@@ -1,10 +1,6 @@
-using System.IO;
-using System.Linq;
 using System.Text.Json;
-using Json.Schema;
 using Microsoft.OpenApi;
 using Microsoft.OpenApi.Reader;
-using OpenApiContractValidation.Models;
 using OpenApiContractValidation.Schema;
 using Xunit;
 

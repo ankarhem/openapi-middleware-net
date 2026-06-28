@@ -33,14 +33,7 @@ public sealed class PathTemplate
         RegexOptions.CultureInvariant
     );
 
-    /// <summary>
-    /// A constant value in <see cref="SpecificityKey"/> identifying a parameter segment.
-    /// </summary>
     private const int ParameterKind = 0;
-
-    /// <summary>
-    /// A constant value in <see cref="SpecificityKey"/> identifying a literal segment.
-    /// </summary>
     private const int LiteralKind = 1;
 
     /// <summary>

@@ -7,9 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using OpenApiContractValidation.Errors;
 using OpenApiContractValidation.Middleware;
-using OpenApiContractValidation.Models;
 using OpenApiContractValidation.Options;
-using Xunit;
 
 namespace OpenApiContractValidation.Tests.E2E;
 

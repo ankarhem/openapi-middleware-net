@@ -1,4 +1,3 @@
-using System.Net.Http;
 using Microsoft.Extensions.Options;
 using Microsoft.OpenApi;
 using OpenApiContractValidation.Errors;
