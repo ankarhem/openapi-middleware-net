@@ -1,0 +1,88 @@
+name: release
+
+# Tag-driven release: push a tag matching `v*` (e.g. `v0.2.0`) to publish to NuGet.
+# The version published is read from <Version> in the .csproj — keep the tag and
+# the csproj version in sync (tag v0.2.0 -> <Version>0.2.0</Version>).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # for creating the GitHub Release
+  id-token: write  # for NuGet trusted publishing (OIDC → temp API key)
+
+jobs:
+  publish:
+    name: Build, test, pack, publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (full history, for SourceLink)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag matches csproj version
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          CSPROJ_VERSION=$(grep -oP '(?<=<Version>)[^<]+' \
+            src/OpenApiContractValidation/OpenApiContractValidation.csproj)
+          echo "Tag (without leading v): $TAG"
+          echo "csproj <Version>:       $CSPROJ_VERSION"
+          if [ "$TAG" != "$CSPROJ_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match csproj <Version> $CSPROJ_VERSION"
+            exit 1
+          fi
+
+      - name: Setup .NET SDK (from global.json)
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test --configuration Release --no-build --logger "console;verbosity=normal"
+
+      - name: Pack
+        run: >-
+          dotnet pack
+          src/OpenApiContractValidation/OpenApiContractValidation.csproj
+          --configuration Release
+          --no-build
+          --output nupkgs
+
+      - name: NuGet login (OIDC → temp API key)
+        uses: NuGet/login@v1
+        id: nuget-login
+        with:
+          user: ankarhem
+
+      - name: Publish to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: >-
+          dotnet nuget push
+          nupkgs/*.nupkg
+          --api-key "$NUGET_API_KEY"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

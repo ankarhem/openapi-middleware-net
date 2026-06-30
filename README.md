@@ -198,4 +198,6 @@ Exactly one contract source (`ContractFilePath`, `ContractStream`, or `ContractT
 
 ## License
 
-MIT.
+MPL-2.0. See [LICENSE](LICENSE). Closed-source applications (including
+SaaS) may use this library freely; modifications to the library's own
+source files must be released under MPL-2.0.

@@ -2,14 +2,18 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <PackageId>OpenApiContractValidation</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>ankarhem</Authors>
+    <Copyright>Copyright (c) 2026 ankarhem</Copyright>
     <Description>ASP.NET Core middleware that validates HTTP requests and responses fully conform to an OpenAPI contract, throwing on any violation.</Description>
     <PackageTags>openapi;swagger;aspnetcore;middleware;validation;contract</PackageTags>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
-    <RepositoryUrl>https://github.com/ankarhem/openapi-middleware-net</RepositoryUrl>
+    <PackageLicenseExpression>MPL-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/ankarhem/OpenApiContractValidation</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ankarhem/OpenApiContractValidation</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <PackageReleaseNotes>Switched license from MIT to MPL-2.0 (weak copyleft: closed-source apps and SaaS may use freely; modifications to this library's source files must be released under MPL-2.0).</PackageReleaseNotes>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
@@ -25,6 +29,7 @@
     <PackageReference Include="Microsoft.OpenApi" />
     <PackageReference Include="Microsoft.OpenApi.YamlReader" />
     <PackageReference Include="JsonSchema.Net" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
   </ItemGroup>
 
   <ItemGroup>
